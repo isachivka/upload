@@ -4,6 +4,15 @@
 // Store active uploads
 const activeUploads = new Map();
 
+// Настройки повторных попыток
+const RETRY_SETTINGS = {
+  maxRetries: 3,           // Максимальное количество повторных попыток
+  initialDelay: 2000,      // Начальная задержка (2 секунды)
+  maxDelay: 30000,         // Максимальная задержка (30 секунд)
+  backoffFactor: 2,        // Множитель для экспоненциального увеличения задержки
+  timeoutMs: 6000000        // Таймаут запроса (10 минут)
+};
+
 // Перехват всех необработанных ошибок в worker
 self.addEventListener('error', function(event) {
   console.error('Worker global error:', event.message);
@@ -48,9 +57,40 @@ self.addEventListener('message', function(e) {
   }
 });
 
-// Start a file upload
-function startUpload({ file, id }) {
+// Функция для расчета задержки перед повторной попыткой
+function getRetryDelay(attempt) {
+  const delay = RETRY_SETTINGS.initialDelay * Math.pow(RETRY_SETTINGS.backoffFactor, attempt);
+  return Math.min(delay, RETRY_SETTINGS.maxDelay);
+}
+
+// Start a file upload with retry capability
+function startUpload({ file, id }, retryCount = 0) {
   try {
+    // Проверяем превышение лимита повторных попыток
+    if (retryCount > RETRY_SETTINGS.maxRetries) {
+      self.postMessage({
+        type: 'UPLOAD_ERROR',
+        payload: {
+          id,
+          error: `Превышено максимальное количество попыток загрузки (${RETRY_SETTINGS.maxRetries})`
+        }
+      });
+      return;
+    }
+    
+    // Отправляем уведомление о повторной попытке
+    if (retryCount > 0) {
+      self.postMessage({
+        type: 'PROGRESS_UPDATE',
+        payload: {
+          id,
+          progress: 0,
+          retryCount,
+          message: `Повторная попытка ${retryCount}/${RETRY_SETTINGS.maxRetries}...`
+        }
+      });
+    }
+    
     // Create FormData (can't pass FormData directly to worker)
     const formData = new FormData();
     formData.append('file', file);
@@ -96,7 +136,8 @@ function startUpload({ file, id }) {
               id,
               progress,
               speed,
-              estimatedTime
+              estimatedTime,
+              retryCount: retryCount > 0 ? retryCount : undefined
             }
           });
         }
@@ -127,14 +168,24 @@ function startUpload({ file, id }) {
             }
           });
         } else {
-          self.postMessage({
-            type: 'UPLOAD_ERROR',
-            payload: {
-              id,
-              status: xhr.status,
-              error: `HTTP ошибка ${xhr.status}: ${xhr.statusText || ''} ${xhr.responseText || ''}`
-            }
-          });
+          // Если ошибка 5xx (серверная), пробуем повторить
+          if (xhr.status >= 500 && xhr.status < 600 && retryCount < RETRY_SETTINGS.maxRetries) {
+            const delay = getRetryDelay(retryCount);
+            console.log(`HTTP ${xhr.status} ошибка, повторная попытка через ${delay}ms`);
+            
+            setTimeout(() => {
+              startUpload({ file, id }, retryCount + 1);
+            }, delay);
+          } else {
+            self.postMessage({
+              type: 'UPLOAD_ERROR',
+              payload: {
+                id,
+                status: xhr.status,
+                error: `HTTP ошибка ${xhr.status}: ${xhr.statusText || ''} ${xhr.responseText || ''}`
+              }
+            });
+          }
         }
       } catch (error) {
         console.error('Error in onload handler:', error);
@@ -153,13 +204,24 @@ function startUpload({ file, id }) {
       try {
         console.error('XHR error event:', event);
         activeUploads.delete(id);
-        self.postMessage({
-          type: 'UPLOAD_ERROR',
-          payload: {
-            id,
-            error: `Сетевая ошибка: ${xhr.statusText || 'Детали недоступны'}`
-          }
-        });
+        
+        // Пробуем повторить при сетевой ошибке
+        if (retryCount < RETRY_SETTINGS.maxRetries) {
+          const delay = getRetryDelay(retryCount);
+          console.log(`Сетевая ошибка, повторная попытка через ${delay}ms`);
+          
+          setTimeout(() => {
+            startUpload({ file, id }, retryCount + 1);
+          }, delay);
+        } else {
+          self.postMessage({
+            type: 'UPLOAD_ERROR',
+            payload: {
+              id,
+              error: `Сетевая ошибка: ${xhr.statusText || 'Детали недоступны'} (после ${retryCount} попыток)`
+            }
+          });
+        }
       } catch (error) {
         console.error('Error in error handler:', error);
         self.postMessage({
@@ -188,14 +250,26 @@ function startUpload({ file, id }) {
     // Set timeout handler
     xhr.ontimeout = function() {
       try {
+        console.log(`Таймаут соединения, попытка ${retryCount + 1}`);
         activeUploads.delete(id);
-        self.postMessage({
-          type: 'UPLOAD_ERROR',
-          payload: {
-            id,
-            error: 'Таймаут соединения'
-          }
-        });
+        
+        // Пробуем повторить при таймауте
+        if (retryCount < RETRY_SETTINGS.maxRetries) {
+          const delay = getRetryDelay(retryCount);
+          console.log(`Таймаут соединения, повторная попытка через ${delay}ms`);
+          
+          setTimeout(() => {
+            startUpload({ file, id }, retryCount + 1);
+          }, delay);
+        } else {
+          self.postMessage({
+            type: 'UPLOAD_ERROR',
+            payload: {
+              id,
+              error: `Таймаут соединения (после ${retryCount + 1} попыток)`
+            }
+          });
+        }
       } catch (error) {
         console.error('Error in timeout handler:', error);
       }
@@ -204,25 +278,38 @@ function startUpload({ file, id }) {
     // Start the upload
     try {
       xhr.open('POST', '/api/upload');
-      // Пробуем увеличить таймаут
-      xhr.timeout = 300000; // 5 минут
+      xhr.timeout = RETRY_SETTINGS.timeoutMs; // Таймаут из настроек (10 минут)
       xhr.send(formData);
       
       // Notify that upload has started
       self.postMessage({
         type: 'UPLOAD_STARTED',
-        payload: { id }
+        payload: { 
+          id,
+          retryCount: retryCount > 0 ? retryCount : undefined
+        }
       });
     } catch (error) {
       console.error('Error starting upload:', error);
       activeUploads.delete(id);
-      self.postMessage({
-        type: 'UPLOAD_ERROR',
-        payload: {
-          id,
-          error: `Ошибка запуска загрузки: ${error.message || 'Неизвестная ошибка'}`
-        }
-      });
+      
+      // Пробуем повторить при ошибке запуска загрузки
+      if (retryCount < RETRY_SETTINGS.maxRetries) {
+        const delay = getRetryDelay(retryCount);
+        console.log(`Ошибка запуска загрузки, повторная попытка через ${delay}ms`);
+        
+        setTimeout(() => {
+          startUpload({ file, id }, retryCount + 1);
+        }, delay);
+      } else {
+        self.postMessage({
+          type: 'UPLOAD_ERROR',
+          payload: {
+            id,
+            error: `Ошибка запуска загрузки: ${error.message || 'Неизвестная ошибка'} (после ${retryCount + 1} попыток)`
+          }
+        });
+      }
     }
   } catch (error) {
     console.error('Error in startUpload:', error);

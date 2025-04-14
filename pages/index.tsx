@@ -21,6 +21,8 @@ interface FileWithProgress {
   speed?: number; // Upload speed in MB/s
   estimatedTime?: number; // Estimated time in seconds
   errorMessage?: string; // Сообщение об ошибке
+  retryCount?: number; // Счетчик повторных попыток
+  message?: string; // Дополнительное сообщение
 }
 
 export default function Home() {
@@ -29,6 +31,76 @@ export default function Home() {
   const workerRef = useRef<Worker | null>(null);
   const [isWorkerSupported, setIsWorkerSupported] = useState<boolean>(true);
   const [workerError, setWorkerError] = useState<string | null>(null);
+  const wakeLockRef = useRef<any>(null);
+  const [isWakeLockSupported, setIsWakeLockSupported] = useState<boolean>(false);
+  const [isWakeLockActive, setIsWakeLockActive] = useState<boolean>(false);
+
+  // Check for Wake Lock API support
+  useEffect(() => {
+    if ('wakeLock' in navigator) {
+      setIsWakeLockSupported(true);
+    }
+  }, []);
+
+  // Request wake lock when there are active uploads
+  useEffect(() => {
+    const hasActiveUploads = files.some(f => f.status === 'uploading');
+    
+    const requestWakeLock = async () => {
+      try {
+        if (isWakeLockSupported && hasActiveUploads && !wakeLockRef.current) {
+          // @ts-ignore - TypeScript doesn't know about wakeLock API yet
+          wakeLockRef.current = await navigator.wakeLock.request('screen');
+          setIsWakeLockActive(true);
+          
+          // Add release event listener
+          wakeLockRef.current.addEventListener('release', () => {
+            console.log('Wake Lock released');
+            setIsWakeLockActive(false);
+            wakeLockRef.current = null;
+          });
+          
+          console.log('Wake Lock активирован');
+        }
+      } catch (error) {
+        console.error('Не удалось получить Wake Lock:', error);
+      }
+    };
+    
+    const releaseWakeLock = async () => {
+      if (wakeLockRef.current && !hasActiveUploads) {
+        try {
+          await wakeLockRef.current.release();
+          wakeLockRef.current = null;
+          setIsWakeLockActive(false);
+          console.log('Wake Lock освобожден');
+        } catch (error) {
+          console.error('Не удалось освободить Wake Lock:', error);
+        }
+      }
+    };
+    
+    // Request wake lock when uploads start
+    if (hasActiveUploads) {
+      requestWakeLock();
+    } else {
+      releaseWakeLock();
+    }
+    
+    // Handle visibility change to re-acquire wake lock when tab becomes visible again
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && hasActiveUploads && !wakeLockRef.current) {
+        requestWakeLock();
+      }
+    };
+    
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      releaseWakeLock();
+    };
+  }, [files, isWakeLockSupported]);
 
   // Initialize the upload worker
   useEffect(() => {
@@ -70,7 +142,12 @@ export default function Home() {
     switch (type) {
       case 'UPLOAD_STARTED':
         setFiles(prev => prev.map(f => 
-          f.id === payload.id ? { ...f, status: 'uploading', errorMessage: undefined } : f
+          f.id === payload.id ? { 
+            ...f, 
+            status: 'uploading', 
+            errorMessage: undefined,
+            retryCount: payload.retryCount
+          } : f
         ));
         break;
         
@@ -80,7 +157,9 @@ export default function Home() {
             ...f, 
             progress: payload.progress, 
             speed: payload.speed,
-            estimatedTime: payload.estimatedTime
+            estimatedTime: payload.estimatedTime,
+            retryCount: payload.retryCount,
+            message: payload.message
           } : f
         ));
         break;
@@ -315,6 +394,12 @@ export default function Home() {
             </div>
           )}
           
+          {isWakeLockActive && (
+            <div className={styles.info}>
+              <span>Экран будет активен до завершения загрузки</span>
+            </div>
+          )}
+          
           <div className={styles.uploadContainer}>
             <input 
               type="file" 
@@ -379,9 +464,10 @@ export default function Home() {
                     {fileItem.status === 'pending' && 'Ожидание'}
                     {fileItem.status === 'uploading' && (
                       <>
-                        {`${fileItem.progress}% `}
-                        {fileItem.speed !== undefined && `(${fileItem.speed.toFixed(2)} MB/s) `}
-                        {fileItem.estimatedTime !== undefined && `Est: ${formatTime(fileItem.estimatedTime)}`}
+                        {fileItem.message || `${fileItem.progress}%`}
+                        {fileItem.retryCount && !fileItem.message && ` (Попытка ${fileItem.retryCount})`}
+                        {fileItem.speed !== undefined && ` (${fileItem.speed.toFixed(2)} MB/s)`}
+                        {fileItem.estimatedTime !== undefined && ` Est: ${formatTime(fileItem.estimatedTime)}`}
                       </>
                     )}
                     {fileItem.status === 'done' && 'Завершено'}
