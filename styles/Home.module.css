@@ -184,7 +184,29 @@
 }
 
 .error {
-  background-color: var(--error-color);
+  background-color: #f8d7da;
+  color: #721c24;
+  padding: 10px 15px;
+  margin-bottom: 20px;
+  border-radius: 5px;
+  border-left: 5px solid #f5c6cb;
+  font-size: 0.9rem;
+  width: 100%;
+  max-width: 600px;
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.closeButton {
+  background: none;
+  border: none;
+  color: #721c24;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 10px;
 }
 
 .removeButton {

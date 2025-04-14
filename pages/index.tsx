@@ -20,6 +20,7 @@ interface FileWithProgress {
   id: string;
   speed?: number; // Upload speed in MB/s
   estimatedTime?: number; // Estimated time in seconds
+  errorMessage?: string; // Сообщение об ошибке
 }
 
 export default function Home() {
@@ -27,23 +28,37 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const workerRef = useRef<Worker | null>(null);
   const [isWorkerSupported, setIsWorkerSupported] = useState<boolean>(true);
+  const [workerError, setWorkerError] = useState<string | null>(null);
 
   // Initialize the upload worker
   useEffect(() => {
     if (typeof Worker !== 'undefined') {
-      // Create the worker
-      workerRef.current = new Worker('/uploadWorker.js');
-      
-      // Set up message handlers
-      workerRef.current.onmessage = handleWorkerMessage;
-      
-      // Clean up on unmount
-      return () => {
-        workerRef.current?.terminate();
-        workerRef.current = null;
-      };
+      try {
+        // Create the worker
+        workerRef.current = new Worker('/uploadWorker.js');
+        
+        // Set up message handlers
+        workerRef.current.onmessage = handleWorkerMessage;
+        
+        // Обработка ошибок Worker
+        workerRef.current.onerror = (error) => {
+          console.error('Worker error:', error);
+          setWorkerError(`Worker ошибка: ${error.message || 'Неизвестная ошибка'}`);
+        };
+        
+        // Clean up on unmount
+        return () => {
+          workerRef.current?.terminate();
+          workerRef.current = null;
+        };
+      } catch (error) {
+        console.error('Error initializing Worker:', error);
+        setWorkerError(`Ошибка инициализации Worker: ${error instanceof Error ? error.message : 'Неизвестная ошибка'}`);
+        setIsWorkerSupported(false);
+      }
     } else {
       console.error('Web Workers are not supported in this browser');
+      setWorkerError('Web Workers не поддерживаются в этом браузере');
       setIsWorkerSupported(false);
     }
   }, []);
@@ -55,7 +70,7 @@ export default function Home() {
     switch (type) {
       case 'UPLOAD_STARTED':
         setFiles(prev => prev.map(f => 
-          f.id === payload.id ? { ...f, status: 'uploading' } : f
+          f.id === payload.id ? { ...f, status: 'uploading', errorMessage: undefined } : f
         ));
         break;
         
@@ -77,20 +92,30 @@ export default function Home() {
         break;
         
       case 'UPLOAD_ERROR':
-        setFiles(prev => prev.map(f => 
-          f.id === payload.id ? { ...f, status: 'error' } : f
-        ));
         console.error(`Upload error for file ${payload.id}:`, payload.error);
+        setFiles(prev => prev.map(f => 
+          f.id === payload.id ? { 
+            ...f, 
+            status: 'error',
+            errorMessage: payload.error || 'Неизвестная ошибка' 
+          } : f
+        ));
         break;
         
       case 'UPLOAD_CANCELLED':
         setFiles(prev => prev.map(f => 
-          f.id === payload.id ? { ...f, status: 'pending' } : f
+          f.id === payload.id ? { ...f, status: 'pending', errorMessage: undefined } : f
         ));
+        break;
+        
+      case 'WORKER_ERROR':
+        console.error('Worker error:', payload.error, payload.stack);
+        setWorkerError(payload.error);
         break;
         
       default:
         console.warn('Unknown message from worker:', type);
+        setWorkerError(`Неизвестное сообщение от Worker: ${type}`);
     }
   };
 
@@ -271,6 +296,19 @@ export default function Home() {
           <h1 className={styles.title}>Передача файлов</h1>
           <p className={styles.description}>Выберите файлы для передачи на компьютер</p>
           
+          {workerError && (
+            <div className={styles.error}>
+              <strong>Ошибка:</strong> {workerError}
+              <button 
+                onClick={() => setWorkerError(null)} 
+                className={styles.closeButton}
+                aria-label="Close error"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+          
           {!isWorkerSupported && (
             <div className={styles.warning}>
               Фоновая загрузка не поддерживается в этом браузере. Загрузки могут прерываться при переключении между приложениями.
@@ -347,7 +385,11 @@ export default function Home() {
                       </>
                     )}
                     {fileItem.status === 'done' && 'Завершено'}
-                    {fileItem.status === 'error' && 'Ошибка'}
+                    {fileItem.status === 'error' && (
+                      <>
+                        Ошибка: {fileItem.errorMessage || 'Неизвестная ошибка'}
+                      </>
+                    )}
                   </span>
                 </div>
               ))}
