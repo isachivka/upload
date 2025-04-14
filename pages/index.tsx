@@ -18,6 +18,8 @@ interface FileWithProgress {
   progress: number;
   status: 'pending' | 'uploading' | 'done' | 'error';
   id: string;
+  speed?: number; // Upload speed in MB/s
+  estimatedTime?: number; // Estimated time in seconds
 }
 
 export default function Home() {
@@ -63,12 +65,35 @@ export default function Home() {
       ));
 
       const xhr = new XMLHttpRequest();
+      let lastLoaded = 0;
+      let lastTime = Date.now();
       
       xhr.upload.addEventListener('progress', (event) => {
         if (event.lengthComputable) {
+          const currentTime = Date.now();
+          const timeElapsed = (currentTime - lastTime) / 1000; // in seconds
+          const loadedDifference = event.loaded - lastLoaded; // in bytes
+          
+          // Only calculate speed if enough time has passed to avoid very small time intervals
+          let speed = 0;
+          let estimatedTime = undefined;
+          if (timeElapsed > 0.1) {
+            speed = (loadedDifference / timeElapsed) / (1024 * 1024); // MB/s
+            
+            // Calculate estimated time remaining
+            if (speed > 0) {
+              const remainingBytes = event.total - event.loaded;
+              const remainingMB = remainingBytes / (1024 * 1024);
+              estimatedTime = remainingMB / speed; // seconds
+            }
+            
+            lastLoaded = event.loaded;
+            lastTime = currentTime;
+          }
+          
           const progress = Math.round((event.loaded / event.total) * 100);
           setFiles(prev => prev.map(f => 
-            f.id === fileItem.id ? { ...f, progress } : f
+            f.id === fileItem.id ? { ...f, progress, speed, estimatedTime } : f
           ));
         }
       });
@@ -110,6 +135,23 @@ export default function Home() {
 
   const removeFile = (id: string) => {
     setFiles(prev => prev.filter(f => f.id !== id));
+  };
+
+  // Format time in seconds to a human-readable string
+  const formatTime = (seconds?: number): string => {
+    if (seconds === undefined || !isFinite(seconds)) return '';
+    
+    if (seconds < 60) {
+      return `${Math.round(seconds)}s`;
+    } else if (seconds < 3600) {
+      const minutes = Math.floor(seconds / 60);
+      const remainingSeconds = Math.round(seconds % 60);
+      return `${minutes}m ${remainingSeconds}s`;
+    } else {
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      return `${hours}h ${minutes}m`;
+    }
   };
 
   return (
@@ -184,7 +226,13 @@ export default function Home() {
                   </div>
                   <span className={styles.status}>
                     {fileItem.status === 'pending' && 'Ожидание'}
-                    {fileItem.status === 'uploading' && `${fileItem.progress}%`}
+                    {fileItem.status === 'uploading' && (
+                      <>
+                        {`${fileItem.progress}% `}
+                        {fileItem.speed !== undefined && `(${fileItem.speed.toFixed(2)} MB/s) `}
+                        {fileItem.estimatedTime !== undefined && `Est: ${formatTime(fileItem.estimatedTime)}`}
+                      </>
+                    )}
                     {fileItem.status === 'done' && 'Завершено'}
                     {fileItem.status === 'error' && 'Ошибка'}
                   </span>
