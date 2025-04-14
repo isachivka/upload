@@ -1,7 +1,7 @@
 import Head from "next/head";
 import { Geist, Geist_Mono } from "next/font/google";
 import styles from "@/styles/Home.module.css";
-import { useState, useRef, ChangeEvent } from "react";
+import { useState, useRef, ChangeEvent, useEffect } from "react";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -25,6 +25,74 @@ interface FileWithProgress {
 export default function Home() {
   const [files, setFiles] = useState<FileWithProgress[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const workerRef = useRef<Worker | null>(null);
+  const [isWorkerSupported, setIsWorkerSupported] = useState<boolean>(true);
+
+  // Initialize the upload worker
+  useEffect(() => {
+    if (typeof Worker !== 'undefined') {
+      // Create the worker
+      workerRef.current = new Worker('/uploadWorker.js');
+      
+      // Set up message handlers
+      workerRef.current.onmessage = handleWorkerMessage;
+      
+      // Clean up on unmount
+      return () => {
+        workerRef.current?.terminate();
+        workerRef.current = null;
+      };
+    } else {
+      console.error('Web Workers are not supported in this browser');
+      setIsWorkerSupported(false);
+    }
+  }, []);
+  
+  // Handle messages from the worker
+  const handleWorkerMessage = (event: MessageEvent) => {
+    const { type, payload } = event.data;
+    
+    switch (type) {
+      case 'UPLOAD_STARTED':
+        setFiles(prev => prev.map(f => 
+          f.id === payload.id ? { ...f, status: 'uploading' } : f
+        ));
+        break;
+        
+      case 'PROGRESS_UPDATE':
+        setFiles(prev => prev.map(f => 
+          f.id === payload.id ? { 
+            ...f, 
+            progress: payload.progress, 
+            speed: payload.speed,
+            estimatedTime: payload.estimatedTime
+          } : f
+        ));
+        break;
+        
+      case 'UPLOAD_COMPLETE':
+        setFiles(prev => prev.map(f => 
+          f.id === payload.id ? { ...f, status: 'done', progress: 100 } : f
+        ));
+        break;
+        
+      case 'UPLOAD_ERROR':
+        setFiles(prev => prev.map(f => 
+          f.id === payload.id ? { ...f, status: 'error' } : f
+        ));
+        console.error(`Upload error for file ${payload.id}:`, payload.error);
+        break;
+        
+      case 'UPLOAD_CANCELLED':
+        setFiles(prev => prev.map(f => 
+          f.id === payload.id ? { ...f, status: 'pending' } : f
+        ));
+        break;
+        
+      default:
+        console.warn('Unknown message from worker:', type);
+    }
+  };
 
   const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -48,14 +116,32 @@ export default function Home() {
   };
 
   const uploadFiles = async () => {
+    // If workers are not supported, fall back to the original method
+    if (!isWorkerSupported || !workerRef.current) {
+      for (const fileItem of files) {
+        if (fileItem.status !== 'pending') continue;
+        await uploadFileWithoutWorker(fileItem);
+      }
+      return;
+    }
+    
+    // Use worker for uploads
     for (const fileItem of files) {
       if (fileItem.status !== 'pending') continue;
       
-      await uploadFile(fileItem);
+      // Send file to worker for upload
+      workerRef.current.postMessage({
+        type: 'UPLOAD_FILE',
+        payload: {
+          id: fileItem.id,
+          file: fileItem.file
+        }
+      });
     }
   };
 
-  const uploadFile = async (fileItem: FileWithProgress) => {
+  // Original upload method (fallback if workers not supported)
+  const uploadFileWithoutWorker = async (fileItem: FileWithProgress) => {
     const formData = new FormData();
     formData.append('file', fileItem.file);
 
@@ -77,7 +163,7 @@ export default function Home() {
           // Only calculate speed if enough time has passed to avoid very small time intervals
           let speed = 0;
           let estimatedTime = undefined;
-          if (timeElapsed > 0.1) {
+          if (timeElapsed > -0.1) {
             speed = (loadedDifference / timeElapsed) / (1024 * 1024); // MB/s
             
             // Calculate estimated time remaining
@@ -129,11 +215,29 @@ export default function Home() {
     }
   };
 
+  const cancelUpload = (id: string) => {
+    const fileItem = files.find(f => f.id === id);
+    
+    if (fileItem && fileItem.status === 'uploading' && workerRef.current) {
+      // Tell worker to cancel
+      workerRef.current.postMessage({
+        type: 'CANCEL_UPLOAD',
+        payload: { id }
+      });
+    }
+  };
+
   const clearCompleted = () => {
     setFiles(prev => prev.filter(f => f.status !== 'done'));
   };
 
   const removeFile = (id: string) => {
+    // If file is uploading, cancel it first
+    const fileItem = files.find(f => f.id === id);
+    if (fileItem && fileItem.status === 'uploading') {
+      cancelUpload(id);
+    }
+    
     setFiles(prev => prev.filter(f => f.id !== id));
   };
 
@@ -166,6 +270,12 @@ export default function Home() {
         <main className={styles.main}>
           <h1 className={styles.title}>Передача файлов</h1>
           <p className={styles.description}>Выберите файлы для передачи на компьютер</p>
+          
+          {!isWorkerSupported && (
+            <div className={styles.warning}>
+              Фоновая загрузка не поддерживается в этом браузере. Загрузки могут прерываться при переключении между приложениями.
+            </div>
+          )}
           
           <div className={styles.uploadContainer}>
             <input 
@@ -211,11 +321,14 @@ export default function Home() {
                       {(fileItem.file.size / (1024 * 1024)).toFixed(2)} MB
                     </span>
                     <button 
-                      onClick={() => removeFile(fileItem.id)}
+                      onClick={() => fileItem.status === 'uploading' 
+                        ? cancelUpload(fileItem.id) 
+                        : removeFile(fileItem.id)
+                      }
                       className={styles.removeButton}
-                      aria-label="Remove file"
+                      aria-label={fileItem.status === 'uploading' ? "Cancel upload" : "Remove file"}
                     >
-                      ✕
+                      {fileItem.status === 'uploading' ? '⏹' : '✕'}
                     </button>
                   </div>
                   <div className={styles.progressContainer}>
