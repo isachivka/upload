@@ -1,14 +1,20 @@
 # File Transfer App
 
-A simple web application for transferring files from your phone to your MacBook.
+A simple web application for transferring files from my phone to my MacBook.
+
+Vibe coded in 15 minutes using Cursor & Claude 3.7
 
 ## Features
 
 - Upload multiple files simultaneously
-- Progress tracking per file
+- Progress tracking per file with upload speed and estimated time remaining
 - Support for large files (up to 50GB)
 - Files are automatically saved to your Downloads folder
-- Responsive design that works on mobile devices
+- Background uploads through Web Workers (continues even when switching apps)
+- Auto-retry mechanism for failed uploads (up to 3 retries with exponential backoff)
+- Screen stays active during file uploads (using Wake Lock API)
+- Responsive design that works well on mobile devices
+- Detailed error reporting
 
 ## Getting Started
 
@@ -47,11 +53,27 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 5. Select files to upload and click "Upload Files"
 6. Your files will be saved to the Downloads folder on your MacBook
 
+## Advanced Features
+
+### Background Uploads
+The app uses Web Workers to perform uploads in a background thread. This means uploads will continue even when you switch to another app on your phone.
+
+### Screen Wake Lock
+When an upload is in progress, the app prevents your phone's screen from turning off, similar to when watching a video.
+
+### Auto-Retry Mechanism
+If an upload fails due to network issues or timeouts, the app will automatically retry up to 3 times with increasing delays between attempts.
+
+## Browser Compatibility
+
+- **Web Workers**: Supported in all modern browsers
+- **Wake Lock API**: Supported in Chrome, Edge, and other Chromium-based browsers. Not supported in Safari or Firefox.
+
 ## Project Structure
 
 - `pages/` - Contains the main page and API endpoint
 - `styles/` - Contains the CSS styles
-- `public/` - Static assets
+- `public/` - Static assets and Web Worker implementation
 
 ## Learn More
 
